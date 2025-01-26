@@ -8,6 +8,9 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
+	"strconv"
+	"strings"
 )
 
 // Map functions return a slice of KeyValue.
@@ -15,6 +18,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -46,9 +57,33 @@ func Worker(mapf func(string, string) []KeyValue,
 				return
 			}
 		} else if task == "reduce" {
-			return
+			index, err := strconv.Atoi(filename)
+			if err != nil {
+				log.Fatalf("Error while converting filename to integer: %v", err)
+				return
+			}
+
+			files := getFiles(index)
+			kvData := []KeyValue{}
+
+			for _, filepath := range files {
+				file, err := os.Open(filepath)
+				if err != nil {
+					log.Fatalf("Error while opening file: %v", err)
+					return
+				}
+				dec := json.NewDecoder(file)
+				var kv KeyValue
+				if err := dec.Decode(&kv); err != nil {
+					log.Fatalf("Error while decoding key-value pair: %v", err)
+					return
+				}
+				kvData = append(kvData, kv)
+			}
+			sort.Sort(ByKey(kvData))
+			doReduce(reducef, kvData, filename[:1])
 		} else {
-			log.Fatalf("No task available!\n")
+			log.Fatalf("Invalid task passed!\n")
 		}
 	}
 
@@ -149,6 +184,63 @@ func saveMapResult(kvp []KeyValue, nReduce int, nTask int) error {
 	}
 
 	return nil
+}
+
+func getFiles(index int) []string {
+	suffix := strconv.Itoa(index) + ".json"
+	dir, err := os.Getwd()
+	if err != nil {
+		log.Fatalf("Error while getting current working directory: %v", err)
+		return nil
+	}
+
+	files, err2 := os.ReadDir(dir)
+	if err2 != nil {
+		log.Fatalf("Error while reading directory: %v", err2)
+		return nil
+	}
+
+	fileset := []string{}
+	for _, file := range files {
+		if !file.IsDir() && strings.HasSuffix(file.Name(), suffix) {
+			fileset = append(fileset, file.Name())
+		}
+	}
+
+	return fileset
+}
+
+func doReduce(reducef func(string, []string) string, kvps []KeyValue, index string) {
+	oname := "mr-out-" + index + ".txt"
+	ofile, err := os.Create(oname)
+	if err != nil {
+		log.Fatalf("Error while creating output file: %v", err)
+		return
+	}
+
+	//
+	// call Reduce on each distinct key in kvps[],
+	// and print the result to mr-out-<index>.
+	//
+	i := 0
+	for i < len(kvps) {
+		j := i + 1
+		for j < len(kvps) && kvps[j].Key == kvps[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, kvps[k].Value)
+		}
+		output := reducef(kvps[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", kvps[i].Key, output)
+
+		i = j
+	}
+
+	ofile.Close()
 }
 
 // send an RPC request to the coordinator, wait for the response.

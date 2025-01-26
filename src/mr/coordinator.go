@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"strconv"
 	"sync"
 )
 
 type Coordinator struct {
 	// Your definitions here.
-	files   map[string]bool
+	mfiles  map[string]bool
+	rfiles  map[int]bool
 	nReduce int
 	mu      sync.Mutex
 }
@@ -23,15 +25,26 @@ type Coordinator struct {
 func (c *Coordinator) FetchTask(args *TaskReply, reply *TaskReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for file, done := range c.files {
+	for file, done := range c.mfiles {
 		if !done {
 			reply.Task = "map"
 			reply.Filename = file
 			reply.NReduce = c.nReduce
-			c.files[file] = true
+			c.mfiles[file] = true
 			return nil
 		}
 	}
+
+	for i := 0; i < c.nReduce; i++ {
+		if !c.rfiles[i] {
+			reply.Task = "reduce"
+			reply.Filename = strconv.Itoa(i)
+			reply.NReduce = c.nReduce
+			c.rfiles[i] = true
+			return nil
+		}
+	}
+
 	return errors.New("no tasks available")
 }
 
@@ -65,7 +78,7 @@ func (c *Coordinator) Done() bool {
 	// Your code here.
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, done := range c.files {
+	for _, done := range c.rfiles {
 		if !done {
 			ret = false
 			break
@@ -80,7 +93,8 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
-		files:   make(map[string]bool),
+		mfiles:  make(map[string]bool),
+		rfiles:  make(map[int]bool),
 		nReduce: nReduce,
 	}
 
@@ -88,7 +102,11 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, file := range files {
-		c.files[file] = false
+		c.mfiles[file] = false
+	}
+
+	for i := 0; i < nReduce; i++ {
+		c.rfiles[i] = false
 	}
 
 	c.server()
