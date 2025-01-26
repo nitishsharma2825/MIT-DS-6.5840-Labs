@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -40,12 +41,13 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	cnt := 0
 	for {
 		task, filename, nReduce := CallFetchTask()
-		fmt.Println("Retrieved Data: " + task + " " + filename + " " + strconv.Itoa(nReduce))
+		// fmt.Println("Retrieved Data: " + task + " " + filename + " " + strconv.Itoa(nReduce))
 
 		if task == "map" {
-			nTask := ihash(filename) % nReduce
+			nTask := ihash(filename)
 
 			kv, err := doMap(mapf, filename)
 			if err != nil {
@@ -57,7 +59,7 @@ func Worker(mapf func(string, string) []KeyValue,
 				fmt.Printf("saveMapResult failed!\n")
 				return
 			}
-			CallTaskDone()
+			CallTaskDone("map")
 		} else if task == "reduce" {
 			index, err := strconv.Atoi(filename)
 			if err != nil {
@@ -75,18 +77,24 @@ func Worker(mapf func(string, string) []KeyValue,
 					return
 				}
 				dec := json.NewDecoder(file)
-				var kv KeyValue
-				if err := dec.Decode(&kv); err != nil {
-					log.Fatalf("Error while decoding key-value pair: %v", err)
-					return
+				for {
+					var kv KeyValue
+					if err := dec.Decode(&kv); err != nil {
+						break
+					}
+					kvData = append(kvData, kv)
 				}
-				kvData = append(kvData, kv)
 			}
 			sort.Sort(ByKey(kvData))
 			doReduce(reducef, kvData, filename[:1])
-			CallTaskDone()
+			CallTaskDone("reduce")
 		} else {
-			log.Fatalf("Invalid task passed!\n")
+			cnt := cnt + 1
+			if cnt > 10 {
+				break
+			} else {
+				time.Sleep(time.Millisecond * 100)
+			}
 		}
 	}
 
@@ -124,8 +132,6 @@ func CallExample() {
 
 // Calls the Coordinator.FetchTask RPC and returns the task, filename, and number of reduce tasks.
 func CallFetchTask() (string, string, int) {
-	fmt.Println("Calling FetchTask")
-
 	args := ExampleArgs{}
 	reply := TaskReply{}
 
@@ -134,16 +140,20 @@ func CallFetchTask() (string, string, int) {
 		fmt.Printf("FetchTask failed!\n")
 		return "", "", 0
 	}
-	fmt.Println("FetchTask returned")
 
 	return reply.Task, reply.Filename, reply.NReduce
 }
 
-func CallTaskDone() {
+func CallTaskDone(taskType string) {
 	args := ExampleArgs{}
 	reply := ExampleReply{}
 
-	ok := call("Coordinator.TaskDone", &args, &reply)
+	rpcName := "Coordinator.MapTaskDone"
+	if taskType == "reduce" {
+		rpcName = "Coordinator.ReduceTaskDone"
+	}
+
+	ok := call(rpcName, &args, &reply)
 	if !ok {
 		fmt.Printf("TaskDone failed!\n")
 	}
@@ -271,9 +281,7 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	}
 	defer c.Close()
 
-	fmt.Println("Calling " + rpcname)
 	err = c.Call(rpcname, args, reply)
-	fmt.Println("Returned " + rpcname)
 	if err == nil {
 		return true
 	}

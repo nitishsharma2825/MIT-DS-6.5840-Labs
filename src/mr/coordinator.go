@@ -2,7 +2,6 @@ package mr
 
 import (
 	"errors"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -14,39 +13,37 @@ import (
 
 type Coordinator struct {
 	// Your definitions here.
-	mfiles  map[string]bool
-	rfiles  map[int]bool
-	nReduce int
-	done    bool
-	mu      sync.Mutex
-	wg      sync.WaitGroup
+	mfiles     map[string]bool
+	rfiles     map[int]bool
+	nReduce    int
+	done       bool
+	mu         sync.Mutex
+	mapTask    int
+	reduceTask int
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
 // FetchTask assigns an available map task to the worker if any are available.
 func (c *Coordinator) FetchTask(args *ExampleArgs, reply *TaskReply) error {
-	fmt.Println("fetchTask called")
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for file, done := range c.mfiles {
 		if !done {
-			c.wg.Add(1)
 			reply.Task = "map"
 			reply.Filename = file
 			reply.NReduce = c.nReduce
 			c.mfiles[file] = true
-			fmt.Println("fetchTask returning map task")
 			return nil
 		}
 	}
 
-	c.wg.Wait()
+	if c.mapTask > 0 {
+		return errors.New("wait for other map workers to finish")
+	}
 
 	for i := 0; i < c.nReduce; i++ {
 		if !c.rfiles[i] {
-			c.wg.Add(1)
 			reply.Task = "reduce"
 			reply.Filename = strconv.Itoa(i)
 			reply.NReduce = c.nReduce
@@ -55,15 +52,25 @@ func (c *Coordinator) FetchTask(args *ExampleArgs, reply *TaskReply) error {
 		}
 	}
 
-	c.wg.Wait()
+	if c.reduceTask > 0 {
+		return errors.New("no tasks available")
+	}
+
 	c.done = true
-	return errors.New("no tasks available")
+	return errors.New("tasks completed")
 }
 
-func (c *Coordinator) TaskDone(args *ExampleArgs, reply *ExampleReply) error {
+func (c *Coordinator) MapTaskDone(args *ExampleArgs, reply *ExampleReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.wg.Done()
+	c.mapTask -= 1
+	return nil
+}
+
+func (c *Coordinator) ReduceTaskDone(args *ExampleArgs, reply *ExampleReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reduceTask -= 1
 	return nil
 }
 
@@ -107,10 +114,12 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
-		mfiles:  make(map[string]bool),
-		rfiles:  make(map[int]bool),
-		nReduce: nReduce,
-		done:    false,
+		mfiles:     make(map[string]bool),
+		rfiles:     make(map[int]bool),
+		nReduce:    nReduce,
+		done:       false,
+		mapTask:    len(files),
+		reduceTask: nReduce,
 	}
 
 	// Your code here.
