@@ -2,6 +2,7 @@ package mr
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -16,27 +17,36 @@ type Coordinator struct {
 	mfiles  map[string]bool
 	rfiles  map[int]bool
 	nReduce int
+	done    bool
 	mu      sync.Mutex
+	wg      sync.WaitGroup
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
 // FetchTask assigns an available map task to the worker if any are available.
-func (c *Coordinator) FetchTask(args *TaskReply, reply *TaskReply) error {
+func (c *Coordinator) FetchTask(args *ExampleArgs, reply *TaskReply) error {
+	fmt.Println("fetchTask called")
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for file, done := range c.mfiles {
 		if !done {
+			c.wg.Add(1)
 			reply.Task = "map"
 			reply.Filename = file
 			reply.NReduce = c.nReduce
 			c.mfiles[file] = true
+			fmt.Println("fetchTask returning map task")
 			return nil
 		}
 	}
 
+	c.wg.Wait()
+
 	for i := 0; i < c.nReduce; i++ {
 		if !c.rfiles[i] {
+			c.wg.Add(1)
 			reply.Task = "reduce"
 			reply.Filename = strconv.Itoa(i)
 			reply.NReduce = c.nReduce
@@ -45,7 +55,16 @@ func (c *Coordinator) FetchTask(args *TaskReply, reply *TaskReply) error {
 		}
 	}
 
+	c.wg.Wait()
+	c.done = true
 	return errors.New("no tasks available")
+}
+
+func (c *Coordinator) TaskDone(args *ExampleArgs, reply *ExampleReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.wg.Done()
+	return nil
 }
 
 // an example RPC handler.
@@ -73,17 +92,12 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := true
+	ret := false
 
 	// Your code here.
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, done := range c.rfiles {
-		if !done {
-			ret = false
-			break
-		}
-	}
+	ret = c.done
 
 	return ret
 }
@@ -96,6 +110,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		mfiles:  make(map[string]bool),
 		rfiles:  make(map[int]bool),
 		nReduce: nReduce,
+		done:    false,
 	}
 
 	// Your code here.
@@ -103,10 +118,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	defer c.mu.Unlock()
 	for _, file := range files {
 		c.mfiles[file] = false
-	}
-
-	for i := 0; i < nReduce; i++ {
-		c.rfiles[i] = false
 	}
 
 	c.server()

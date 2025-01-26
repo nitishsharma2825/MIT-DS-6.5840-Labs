@@ -42,6 +42,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 	for {
 		task, filename, nReduce := CallFetchTask()
+		fmt.Println("Retrieved Data: " + task + " " + filename + " " + strconv.Itoa(nReduce))
 
 		if task == "map" {
 			nTask := ihash(filename) % nReduce
@@ -56,6 +57,7 @@ func Worker(mapf func(string, string) []KeyValue,
 				fmt.Printf("saveMapResult failed!\n")
 				return
 			}
+			CallTaskDone()
 		} else if task == "reduce" {
 			index, err := strconv.Atoi(filename)
 			if err != nil {
@@ -82,6 +84,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 			sort.Sort(ByKey(kvData))
 			doReduce(reducef, kvData, filename[:1])
+			CallTaskDone()
 		} else {
 			log.Fatalf("Invalid task passed!\n")
 		}
@@ -121,7 +124,9 @@ func CallExample() {
 
 // Calls the Coordinator.FetchTask RPC and returns the task, filename, and number of reduce tasks.
 func CallFetchTask() (string, string, int) {
-	args := TaskReply{}
+	fmt.Println("Calling FetchTask")
+
+	args := ExampleArgs{}
 	reply := TaskReply{}
 
 	ok := call("Coordinator.FetchTask", &args, &reply)
@@ -129,8 +134,19 @@ func CallFetchTask() (string, string, int) {
 		fmt.Printf("FetchTask failed!\n")
 		return "", "", 0
 	}
+	fmt.Println("FetchTask returned")
 
 	return reply.Task, reply.Filename, reply.NReduce
+}
+
+func CallTaskDone() {
+	args := ExampleArgs{}
+	reply := ExampleReply{}
+
+	ok := call("Coordinator.TaskDone", &args, &reply)
+	if !ok {
+		fmt.Printf("TaskDone failed!\n")
+	}
 }
 
 // Reads the content of the given file, applies the map function, and returns the resulting key-value pairs.
@@ -255,7 +271,9 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	}
 	defer c.Close()
 
+	fmt.Println("Calling " + rpcname)
 	err = c.Call(rpcname, args, reply)
+	fmt.Println("Returned " + rpcname)
 	if err == nil {
 		return true
 	}
