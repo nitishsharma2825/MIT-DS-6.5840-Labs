@@ -26,9 +26,9 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 type TaskReply struct {
-	task     string
-	filename string
-	nReduce  int
+	Task     string
+	Filename string
+	NReduce  int
 }
 
 // Cook up a unique-ish UNIX-domain socket name

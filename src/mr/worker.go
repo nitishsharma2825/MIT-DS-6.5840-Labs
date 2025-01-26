@@ -86,15 +86,16 @@ func CallExample() {
 
 // Calls the Coordinator.FetchTask RPC and returns the task, filename, and number of reduce tasks.
 func CallFetchTask() (string, string, int) {
+	args := TaskReply{}
 	reply := TaskReply{}
 
-	ok := call("Coordinator.FetchTask", nil, &reply)
+	ok := call("Coordinator.FetchTask", &args, &reply)
 	if !ok {
 		fmt.Printf("FetchTask failed!\n")
 		return "", "", 0
 	}
 
-	return reply.task, reply.filename, reply.nReduce
+	return reply.Task, reply.Filename, reply.NReduce
 }
 
 // Reads the content of the given file, applies the map function, and returns the resulting key-value pairs.
@@ -122,9 +123,10 @@ func saveMapResult(kvp []KeyValue, nReduce int, nTask int) error {
 		file, exist := mapFiles[reduceTask]
 		if !exist {
 			filename := fmt.Sprintf("mr-%d-%d.json", nTask, reduceTask)
-			file, err := os.Create(filename)
+			var err error
+			file, err = os.Create(filename) // Use `=` instead of `:=` to avoid shadowing
 			if err != nil {
-				log.Fatalf("Error while creating map file for task %d for bucket %d", nTask, reduceTask)
+				log.Fatalf("Error while creating map file for task %d for bucket %d: %v", nTask, reduceTask, err)
 				return err
 			}
 			mapFiles[reduceTask] = file
@@ -133,13 +135,17 @@ func saveMapResult(kvp []KeyValue, nReduce int, nTask int) error {
 		enc := json.NewEncoder(file)
 		err := enc.Encode(&kv)
 		if err != nil {
-			log.Fatalf("Error while encoding key-value pair for task %d for bucket %d", nTask, reduceTask)
+			log.Fatalf("Error while encoding key-value pair for task %d for bucket %d: %v", nTask, reduceTask, err)
 			return err
 		}
 	}
 
+	// Close all files
 	for _, file := range mapFiles {
-		file.Close()
+		err := file.Close()
+		if err != nil {
+			log.Printf("Error while closing file: %v", err)
+		}
 	}
 
 	return nil

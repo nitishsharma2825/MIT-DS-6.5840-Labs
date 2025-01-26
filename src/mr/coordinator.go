@@ -20,14 +20,14 @@ type Coordinator struct {
 // Your code here -- RPC handlers for the worker to call.
 
 // FetchTask assigns an available map task to the worker if any are available.
-func (c *Coordinator) FetchTask(reply *TaskReply) error {
+func (c *Coordinator) FetchTask(args *TaskReply, reply *TaskReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for file, done := range c.files {
 		if !done {
-			reply.task = "map"
-			reply.filename = file
-			reply.nReduce = c.nReduce
+			reply.Task = "map"
+			reply.Filename = file
+			reply.NReduce = c.nReduce
 			c.files[file] = true
 			return nil
 		}
