@@ -1,48 +1,65 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
+import (
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"io"
+	"log"
+	"net/rpc"
+	"os"
+)
 
-
-//
 // Map functions return a slice of KeyValue.
-//
 type KeyValue struct {
 	Key   string
 	Value string
 }
 
-//
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
-//
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
-//
 // main/mrworker.go calls this function.
-//
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	for {
+		task, filename, nReduce := CallFetchTask()
+
+		if task == "map" {
+			nTask := ihash(filename) % nReduce
+
+			kv, err := doMap(mapf, filename)
+			if err != nil {
+				fmt.Printf("doMap failed!\n")
+				return
+			}
+			err = saveMapResult(kv, nReduce, nTask)
+			if err != nil {
+				fmt.Printf("saveMapResult failed!\n")
+				return
+			}
+		} else if task == "reduce" {
+			return
+		} else {
+			log.Fatalf("No task available!\n")
+		}
+	}
 
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
 
 }
 
-//
 // example function to show how to make an RPC call to the coordinator.
 //
 // the RPC argument and reply types are defined in rpc.go.
-//
 func CallExample() {
 
 	// declare an argument structure.
@@ -67,11 +84,70 @@ func CallExample() {
 	}
 }
 
-//
+// Calls the Coordinator.FetchTask RPC and returns the task, filename, and number of reduce tasks.
+func CallFetchTask() (string, string, int) {
+	reply := TaskReply{}
+
+	ok := call("Coordinator.FetchTask", nil, &reply)
+	if !ok {
+		fmt.Printf("FetchTask failed!\n")
+		return "", "", 0
+	}
+
+	return reply.task, reply.filename, reply.nReduce
+}
+
+// Reads the content of the given file, applies the map function, and returns the resulting key-value pairs.
+func doMap(mapf func(string, string) []KeyValue, filename string) ([]KeyValue, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		log.Fatalf("cannot open %v", filename)
+		return nil, err
+	}
+	content, err := io.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", filename)
+		return nil, err
+	}
+	file.Close()
+	kva := mapf(filename, string(content))
+	return kva, nil
+}
+
+func saveMapResult(kvp []KeyValue, nReduce int, nTask int) error {
+	mapFiles := make(map[int]*os.File)
+
+	for _, kv := range kvp {
+		reduceTask := ihash(kv.Key) % nReduce
+		file, exist := mapFiles[reduceTask]
+		if !exist {
+			filename := fmt.Sprintf("mr-%d-%d.json", nTask, reduceTask)
+			file, err := os.Create(filename)
+			if err != nil {
+				log.Fatalf("Error while creating map file for task %d for bucket %d", nTask, reduceTask)
+				return err
+			}
+			mapFiles[reduceTask] = file
+		}
+
+		enc := json.NewEncoder(file)
+		err := enc.Encode(&kv)
+		if err != nil {
+			log.Fatalf("Error while encoding key-value pair for task %d for bucket %d", nTask, reduceTask)
+			return err
+		}
+	}
+
+	for _, file := range mapFiles {
+		file.Close()
+	}
+
+	return nil
+}
+
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
-//
 func call(rpcname string, args interface{}, reply interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()
