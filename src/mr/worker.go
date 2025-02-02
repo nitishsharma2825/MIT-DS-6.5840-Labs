@@ -41,10 +41,14 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-	cnt := 0
-	for {
-		task, filename, nReduce := CallFetchTask()
-		// fmt.Println("Retrieved Data: " + task + " " + filename + " " + strconv.Itoa(nReduce))
+	exit := false
+	for !exit {
+		task, filename, nReduce, ok := CallFetchTask()
+
+		if !ok {
+			fmt.Println("Coordinator crashed, worker exiting")
+			return
+		}
 
 		if task == "map" {
 			nTask := ihash(filename)
@@ -54,12 +58,14 @@ func Worker(mapf func(string, string) []KeyValue,
 				fmt.Printf("doMap failed!\n")
 				return
 			}
+
 			err = saveMapResult(kv, nReduce, nTask)
 			if err != nil {
-				fmt.Printf("saveMapResult failed!\n")
+				fmt.Printf("saveMapResultTemp failed!\n")
 				return
 			}
-			CallTaskDone("map")
+
+			ok, exit = CallDone("map", filename)
 		} else if task == "reduce" {
 			index, err := strconv.Atoi(filename)
 			if err != nil {
@@ -70,32 +76,39 @@ func Worker(mapf func(string, string) []KeyValue,
 			files := getFiles(index)
 			kvData := []KeyValue{}
 
-			for _, filepath := range files {
-				file, err := os.Open(filepath)
-				if err != nil {
-					log.Fatalf("Error while opening file: %v", err)
-					return
-				}
-				dec := json.NewDecoder(file)
-				for {
-					var kv KeyValue
-					if err := dec.Decode(&kv); err != nil {
-						break
+			if len(files) > 0 {
+				for _, filepath := range files {
+					file, err := os.Open(filepath)
+					if err != nil {
+						log.Fatalf("Error while opening file: %v", err)
+						return
 					}
-					kvData = append(kvData, kv)
+
+					dec := json.NewDecoder(file)
+					for {
+						var kv KeyValue
+						if err := dec.Decode(&kv); err != nil {
+							break
+						}
+						kvData = append(kvData, kv)
+					}
 				}
+
+				sort.Sort(ByKey(kvData))
+				doReduce(reducef, kvData, filename[:1])
 			}
-			sort.Sort(ByKey(kvData))
-			doReduce(reducef, kvData, filename[:1])
-			CallTaskDone("reduce")
-		} else {
-			cnt := cnt + 1
-			if cnt > 10 {
-				break
-			} else {
-				time.Sleep(time.Millisecond * 100)
-			}
+
+			ok, exit = CallDone("reduce", filename)
+		} else if task == "exit" {
+			exit = true
 		}
+
+		if !ok {
+			fmt.Println("Coordinator crashed, worker exiting")
+			return
+		}
+
+		time.Sleep(time.Millisecond * 100)
 	}
 
 	// uncomment to send the Example RPC to the coordinator.
@@ -131,32 +144,27 @@ func CallExample() {
 }
 
 // Calls the Coordinator.FetchTask RPC and returns the task, filename, and number of reduce tasks.
-func CallFetchTask() (string, string, int) {
+func CallFetchTask() (string, string, int, bool) {
 	args := ExampleArgs{}
 	reply := TaskReply{}
 
 	ok := call("Coordinator.FetchTask", &args, &reply)
-	if !ok {
-		fmt.Printf("FetchTask failed!\n")
-		return "", "", 0
-	}
 
-	return reply.Task, reply.Filename, reply.NReduce
+	return reply.Task, reply.Filename, reply.NReduce, ok
 }
 
-func CallTaskDone(taskType string) {
-	args := ExampleArgs{}
-	reply := ExampleReply{}
-
-	rpcName := "Coordinator.MapTaskDone"
-	if taskType == "reduce" {
-		rpcName = "Coordinator.ReduceTaskDone"
+func CallDone(taskType string, file string) (bool, bool) {
+	args := WorkerTaskArgs{
+		Task:     taskType,
+		Filename: file,
+	}
+	reply := WorkerTaskReply{
+		Exit: false,
 	}
 
-	ok := call(rpcName, &args, &reply)
-	if !ok {
-		fmt.Printf("TaskDone failed!\n")
-	}
+	ok := call("Coordinator.TaskDone", &args, &reply)
+
+	return ok, reply.Exit
 }
 
 // Reads the content of the given file, applies the map function, and returns the resulting key-value pairs.
@@ -166,11 +174,13 @@ func doMap(mapf func(string, string) []KeyValue, filename string) ([]KeyValue, e
 		log.Fatalf("cannot open %v", filename)
 		return nil, err
 	}
+
 	content, err := io.ReadAll(file)
 	if err != nil {
 		log.Fatalf("cannot read %v", filename)
 		return nil, err
 	}
+
 	file.Close()
 	kva := mapf(filename, string(content))
 	return kva, nil
@@ -178,13 +188,15 @@ func doMap(mapf func(string, string) []KeyValue, filename string) ([]KeyValue, e
 
 func saveMapResult(kvp []KeyValue, nReduce int, nTask int) error {
 	mapFiles := make(map[int]*os.File)
+	var err error = nil
 
 	for _, kv := range kvp {
+		// find the reduce task for this key
 		reduceTask := ihash(kv.Key) % nReduce
 		file, exist := mapFiles[reduceTask]
+
 		if !exist {
 			filename := fmt.Sprintf("mr-%d-%d.json", nTask, reduceTask)
-			var err error
 			file, err = os.Create(filename) // Use `=` instead of `:=` to avoid shadowing
 			if err != nil {
 				log.Fatalf("Error while creating map file for task %d for bucket %d: %v", nTask, reduceTask, err)
