@@ -2,8 +2,9 @@ package kvsrv
 
 import (
 	"crypto/rand"
-	"log"
 	"math/big"
+	"sync"
+	"time"
 
 	"6.5840/labrpc"
 )
@@ -11,6 +12,8 @@ import (
 type Clerk struct {
 	server *labrpc.ClientEnd
 	// You will have to modify this struct.
+	cliendId int64
+	mu       sync.Mutex
 }
 
 func nrand() int64 {
@@ -24,6 +27,7 @@ func MakeClerk(server *labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.server = server
 	// You'll have to add code here.
+	ck.cliendId = nrand()
 	return ck
 }
 
@@ -39,19 +43,28 @@ func MakeClerk(server *labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	// Generate a unique request ID
+	requestID := time.Now().UnixNano()
 
 	args := GetArgs{
-		Key: key,
+		Key:       key,
+		RequestID: requestID,
+		ClientID:  ck.cliendId,
 	}
 
 	reply := GetReply{
 		Value: "",
 	}
 
-	ok := ck.server.Call("KVServer.Get", &args, &reply)
-	if !ok {
-		log.Fatal("RPC failed")
-		return ""
+	// Retry request untill success
+	for {
+		ok := ck.server.Call("KVServer.Get", &args, &reply)
+		if ok {
+			break
+		}
 	}
 
 	return reply.Value
@@ -67,20 +80,28 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) string {
 	// You will have to modify this function.
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	// Generate a unique request ID
+	requestID := time.Now().UnixNano()
 
 	args := PutAppendArgs{
-		Key:   key,
-		Value: value,
+		Key:       key,
+		Value:     value,
+		ClientID:  ck.cliendId,
+		RequestID: requestID,
 	}
 
 	reply := PutAppendReply{
 		Value: "",
 	}
 
-	ok := ck.server.Call("KVServer."+op, &args, &reply)
-	if !ok {
-		log.Fatal("RPC failed")
-		return ""
+	for {
+		ok := ck.server.Call("KVServer."+op, &args, &reply)
+		if ok {
+			break
+		}
 	}
 
 	return reply.Value
