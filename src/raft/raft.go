@@ -20,12 +20,15 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -79,8 +82,7 @@ type Raft struct {
 
 	replyChannel chan ApplyMsg
 
-	voteCount    int
-	voteReceived int
+	voteCount int
 }
 
 type LogEntry struct {
@@ -143,10 +145,21 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.log)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
@@ -163,6 +176,21 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var log []LogEntry
+	var currentTerm int
+	var votedFor int
+	if d.Decode(&log) != nil ||
+		d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil {
+		fmt.Printf("Error in Decoding\n")
+	} else {
+		rf.log = log
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -213,7 +241,6 @@ func (rf *Raft) stepDownToFollower(term int) {
 	rf.currentTerm = term
 	rf.votedFor = -1
 	rf.voteCount = 0
-	rf.voteReceived = 0
 }
 
 // example RequestVote RPC handler.
@@ -221,6 +248,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	// If candidate's term < my term, do not grant vote
 	if args.Term < rf.currentTerm {
@@ -269,6 +297,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	if args.Term < rf.currentTerm {
 		reply.Success = false
@@ -373,6 +402,7 @@ func (rf *Raft) sendRequestVoteHelper(server int, args *RequestVoteArgs, reply *
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	servers := len(rf.peers)
 
@@ -380,8 +410,6 @@ func (rf *Raft) sendRequestVoteHelper(server int, args *RequestVoteArgs, reply *
 	if args.Term != rf.currentTerm || rf.state != Candidate || reply.Term < rf.currentTerm {
 		return
 	}
-
-	rf.voteReceived++
 
 	rf.lastPinged = time.Now()
 
@@ -393,23 +421,18 @@ func (rf *Raft) sendRequestVoteHelper(server int, args *RequestVoteArgs, reply *
 		rf.voteCount++
 	}
 
-	if rf.voteReceived > (servers / 2) {
-		if rf.voteCount > (servers / 2) {
-			rf.state = Leader
-			rf.lastPinged = time.Now()
-			rf.currentLeader = rf.me
+	if rf.voteCount > (servers / 2) {
+		rf.state = Leader
+		rf.lastPinged = time.Now()
+		rf.currentLeader = rf.me
 
-			// Reinitialized after election
-			for i := range rf.nextIndex {
-				rf.nextIndex[i] = len(rf.log)
-				rf.matchIndex[i] = 0
-			}
-
-			rf.sendUpdates()
-		} else {
-			rf.stepDownToFollower(rf.currentTerm)
-			rf.lastPinged = time.Now()
+		// Reinitialized after election
+		for i := range rf.nextIndex {
+			rf.nextIndex[i] = len(rf.log)
+			rf.matchIndex[i] = 0
 		}
+
+		rf.sendUpdates()
 	}
 }
 
@@ -426,6 +449,7 @@ func (rf *Raft) sendAppendEntriesHelper(server int, args *AppendEntriesArgs, rep
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	if rf.state != Leader || args.Term != rf.currentTerm || reply.Term < rf.currentTerm {
 		return
@@ -485,12 +509,13 @@ func (rf *Raft) sendAppendEntriesHelper(server int, args *AppendEntriesArgs, rep
 
 func (rf *Raft) attemptElection() {
 
+	defer rf.persist()
+
 	rf.currentTerm++
 	rf.state = Candidate
 	rf.votedFor = rf.me
 	rf.lastPinged = time.Now()
 	rf.voteCount = 1
-	rf.voteReceived = 1
 
 	term := rf.currentTerm
 	servers := len(rf.peers)
@@ -582,6 +607,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	if rf.state != Leader {
 		return index, term, false
