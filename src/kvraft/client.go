@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"math/big"
 	"sync"
+	"time"
 
 	"6.5840/labrpc"
 )
@@ -11,8 +12,10 @@ import (
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	leaderId int
-	mu       sync.Mutex
+	leaderId  int
+	clientId  int64
+	requestId int
+	mu        sync.Mutex
 }
 
 func nrand() int64 {
@@ -27,7 +30,16 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	// You'll have to add code here.
 	ck.leaderId = int(nrand()) % len(servers)
+	ck.clientId = nrand()
+	ck.requestId = 0
 	return ck
+}
+
+func (ck *Clerk) getRequestId() int {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	ck.requestId++
+	return ck.requestId
 }
 
 // fetch the current value for a key.
@@ -43,11 +55,14 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	ck.mu.Lock()
-	defer ck.mu.Unlock()
+
+	// Generate a unique request ID
+	requestID := ck.getRequestId()
 
 	args := GetArgs{
-		Key: key,
+		Key:       key,
+		ClientId:  ck.clientId,
+		RequestId: requestID,
 	}
 
 	reply := GetReply{
@@ -57,12 +72,10 @@ func (ck *Clerk) Get(key string) string {
 
 	for {
 		ok := ck.servers[ck.leaderId].Call("KVServer.Get", &args, &reply)
-		if !ok {
-			continue
-		}
-
-		if reply.Err == ErrWrongLeader {
+		if !ok || reply.Err == ErrWrongLeader {
 			ck.leaderId = int(nrand()) % len(ck.servers)
+			time.Sleep(time.Duration(100) * time.Microsecond)
+			continue
 		}
 
 		if reply.Err == OK {
@@ -87,12 +100,15 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	ck.mu.Lock()
-	defer ck.mu.Unlock()
+
+	// Generate a unique request ID
+	requestID := ck.getRequestId()
 
 	args := PutAppendArgs{
-		Key:   key,
-		Value: value,
+		Key:       key,
+		Value:     value,
+		ClientId:  ck.clientId,
+		RequestId: requestID,
 	}
 
 	reply := PutAppendReply{
@@ -101,16 +117,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	for {
 		ok := ck.servers[ck.leaderId].Call("KVServer."+op, &args, &reply)
-		if !ok {
+		if !ok || reply.Err == ErrWrongLeader {
+			ck.leaderId = int(nrand()) % len(ck.servers)
+			time.Sleep(time.Duration(100) * time.Microsecond)
 			continue
 		}
 
 		if reply.Err == OK {
 			break
-		}
-
-		if reply.Err == ErrWrongLeader {
-			ck.leaderId = int(nrand()) % len(ck.servers)
 		}
 	}
 }
