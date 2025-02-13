@@ -1,6 +1,8 @@
 package kvraft
 
 import (
+	"bytes"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -123,7 +125,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		}
 		reply.Value = operation.Value
 		reply.Err = OK
-	case <-time.After(time.Duration(500) * time.Millisecond):
+	case <-time.After(time.Duration(300) * time.Millisecond):
 		reply.Err = ErrWrongLeader
 	}
 }
@@ -166,7 +168,7 @@ func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 			return
 		}
 		reply.Err = OK
-	case <-time.After(time.Duration(500) * time.Millisecond):
+	case <-time.After(time.Duration(300) * time.Millisecond):
 		reply.Err = ErrWrongLeader
 	}
 }
@@ -209,7 +211,7 @@ func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 			return
 		}
 		reply.Err = OK
-	case <-time.After(time.Duration(500) * time.Millisecond):
+	case <-time.After(time.Duration(300) * time.Millisecond):
 		reply.Err = ErrWrongLeader
 	}
 }
@@ -254,6 +256,51 @@ func (kv *KVServer) receiveUpdates() {
 
 			ch <- op
 		}
+		if response.SnapshotValid {
+			kv.restoreState(response.Snapshot)
+			kv.mu.Lock()
+			kv.lastApplied = response.SnapshotIndex
+			kv.mu.Unlock()
+		}
+		kv.takeSnapshot()
+	}
+}
+
+func (kv *KVServer) restoreState(snapshot []byte) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	if len(snapshot) == 0 || kv.maxraftstate == -1 {
+		return
+	}
+
+	r := bytes.NewBuffer(snapshot)
+	decoder := labgob.NewDecoder(r)
+
+	var tmpDb map[string]string
+	var tmpClientRequests map[int64]Op
+
+	if decoder.Decode(&tmpDb) != nil || decoder.Decode(&tmpClientRequests) != nil {
+		fmt.Println("Error during restoring state from snapshot")
+	} else {
+		kv.db = tmpDb
+		kv.clientRequests = tmpClientRequests
+	}
+}
+
+func (kv *KVServer) takeSnapshot() {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	// need to take a snapshot?
+	if kv.maxraftstate != -1 && kv.rf.GetRaftStateSize() >= kv.maxraftstate {
+		w := new(bytes.Buffer)
+		encoder := labgob.NewEncoder(w)
+		encoder.Encode(kv.db)
+		encoder.Encode(kv.clientRequests)
+
+		snapshot := w.Bytes()
+		kv.rf.Snapshot(kv.lastApplied, snapshot)
 	}
 }
 
@@ -309,6 +356,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.responseCh = make(map[int]chan Op)
 
 	kv.lastApplied = 0
+
+	kv.restoreState(persister.ReadSnapshot())
 
 	go kv.receiveUpdates()
 

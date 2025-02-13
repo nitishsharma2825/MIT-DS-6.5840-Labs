@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"math/big"
 	"sync"
-	"time"
 
 	"6.5840/labrpc"
 )
@@ -74,7 +73,6 @@ func (ck *Clerk) Get(key string) string {
 		ok := ck.servers[ck.leaderId].Call("KVServer.Get", &args, &reply)
 		if !ok || reply.Err == ErrWrongLeader {
 			ck.leaderId = int(nrand()) % len(ck.servers)
-			time.Sleep(time.Duration(100) * time.Microsecond)
 			continue
 		}
 
@@ -119,7 +117,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		ok := ck.servers[ck.leaderId].Call("KVServer."+op, &args, &reply)
 		if !ok || reply.Err == ErrWrongLeader {
 			ck.leaderId = int(nrand()) % len(ck.servers)
-			time.Sleep(time.Duration(100) * time.Microsecond)
 			continue
 		}
 
