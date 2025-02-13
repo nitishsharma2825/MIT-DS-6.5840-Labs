@@ -1,12 +1,13 @@
 package kvraft
 
 import (
-	"6.5840/labgob"
-	"6.5840/labrpc"
-	"6.5840/raft"
 	"log"
 	"sync"
 	"sync/atomic"
+
+	"6.5840/labgob"
+	"6.5840/labrpc"
+	"6.5840/raft"
 )
 
 const Debug = false
@@ -18,11 +19,13 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Key   string
+	Value string
+	Type  string
 }
 
 type KVServer struct {
@@ -35,19 +38,93 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	db map[string]string
 }
-
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	reply.Err = ErrWrongLeader
+
+	op := Op{
+		Key:   args.Key,
+		Value: "",
+		Type:  "get",
+	}
+
+	index, _, isLeader := kv.rf.Start(op)
+
+	if !isLeader {
+		return
+	}
+
+	// wait for the message to be committed in raft log
+	committedMsg := <-kv.applyCh
+
+	if committedMsg.CommandValid && committedMsg.CommandIndex == index {
+		reply.Err = OK
+		reply.Value = kv.db[args.Key]
+	}
 }
 
 func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	reply.Err = ErrWrongLeader
+
+	op := Op{
+		Key:   args.Key,
+		Value: args.Value,
+		Type:  "put",
+	}
+
+	index, _, isLeader := kv.rf.Start(op)
+
+	if !isLeader {
+		return
+	}
+
+	// wait for the message to be committed in raft log
+	committedMsg := <-kv.applyCh
+
+	if committedMsg.CommandValid && committedMsg.CommandIndex == index {
+		kv.db[args.Key] = args.Value
+		reply.Err = OK
+	}
 }
 
 func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	reply.Err = ErrWrongLeader
+
+	op := Op{
+		Key:   args.Key,
+		Value: args.Value,
+		Type:  "append",
+	}
+
+	index, _, isLeader := kv.rf.Start(op)
+
+	if !isLeader {
+		return
+	}
+
+	// wait for the message to be committed in raft log
+	committedMsg := <-kv.applyCh
+
+	if committedMsg.CommandValid && committedMsg.CommandIndex == index {
+		oldval := kv.db[args.Key]
+		newval := oldval + args.Value
+		kv.db[args.Key] = newval
+		reply.Err = OK
+	}
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -96,6 +173,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.db = make(map[string]string)
 
 	return kv
 }
