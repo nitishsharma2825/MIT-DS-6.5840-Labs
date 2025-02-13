@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"fmt"
 	"math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -87,6 +88,8 @@ type Raft struct {
 	// last snapshot metadata
 	lastIncludedIndex int
 	lastIncludedTerm  int
+
+	applyCond *sync.Cond
 }
 
 type LogEntry struct {
@@ -245,7 +248,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Till where can the log be trimmed on this peer? lastApplied?
 	// index should be <= commitIndex of this peer
 	// if service has issued this snapshot, it must be >= lastApplied
-	if index <= rf.lastIncludedIndex || rf.lastApplied != rf.commitIndex {
+	if index <= rf.lastIncludedIndex {
 		return
 	}
 
@@ -385,7 +388,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// my log is smaller than leader's log
 	// or leader's log index is present but term does not match
 	// ask leader to send previous log to find match history
-	if myLastLogIndex < args.PrevLogIndex || rf.log[argsPrevIndex].Term != args.PrevLogTerm {
+	if myLastLogIndex < args.PrevLogIndex || (args.PrevLogIndex >= rf.lastIncludedIndex && rf.log[argsPrevIndex].Term != args.PrevLogTerm) {
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		reply.MatchIndex = rf.commitIndex + 1
@@ -393,43 +396,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// update my log
-	hasLogDiverged := false
-	for _, logEntry := range args.Entries {
-
-		// check if my logs needs to be overwritten
-		// if yes, find the last matching index and update everything after that
-		if myLastLogIndex >= logEntry.Index {
-			idx := rf.getCurrentLogIndex(logEntry.Index)
-			if hasLogDiverged {
-				rf.log[idx] = logEntry
+	index := args.PrevLogIndex
+	for i := range args.Entries {
+		index++
+		if index <= myLastLogIndex {
+			idx := rf.getCurrentLogIndex(index)
+			if index < rf.lastIncludedIndex || rf.log[idx].Term == args.Entries[i].Term {
+				continue
 			} else {
-				if rf.log[idx].Term == logEntry.Term {
-					continue
-				} else {
-					hasLogDiverged = true
-					rf.log[idx] = logEntry
-				}
+				rf.log = rf.log[:idx]
 			}
-		} else {
-			rf.log = append(rf.log, logEntry)
 		}
+		rf.log = append(rf.log, args.Entries[i:]...)
+		break
 	}
 
-	if len(args.Entries) > 0 {
-		lastEntryIndex := args.Entries[len(args.Entries)-1].Index
-		// delete extra entries in the follower log
-		// to make it consistent with leader log
-		if myLastLogIndex > lastEntryIndex {
-			rf.log = rf.log[:rf.getCurrentLogIndex(lastEntryIndex)+1]
-		}
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, rf.getLastIndex())
+		rf.applyCond.Broadcast()
 	}
 
-	rf.commitIndex = min(args.LeaderCommit, rf.getLastIndex())
-
-	reply.Success = true
 	reply.Term = rf.currentTerm
-
-	go rf.applyCommits()
+	reply.Success = true
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
@@ -476,19 +464,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	rf.lastIncludedIndex = args.LastIncludedIndex
 	rf.lastIncludedTerm = args.LastIncludedTerm
+	if rf.commitIndex < args.LastIncludedIndex {
+		rf.commitIndex = args.LastIncludedIndex
+	}
 	rf.persistSnapshot(args.Snapshot)
 
-	rf.commitIndex = rf.lastIncludedIndex
-	rf.lastApplied = rf.lastIncludedIndex
-
-	msg := ApplyMsg{
-		SnapshotValid: true,
-		Snapshot:      args.Snapshot,
-		SnapshotTerm:  rf.lastIncludedTerm,
-		SnapshotIndex: rf.lastIncludedIndex,
-	}
-
-	rf.applyCh <- msg
+	rf.applyCond.Broadcast()
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -598,42 +579,34 @@ func (rf *Raft) sendAppendEntriesHelper(server int, args *AppendEntriesArgs, rep
 			rf.nextIndex[server] = lastEntrySent.Index + 1
 			rf.matchIndex[server] = lastEntrySent.Index
 		}
+
+		// Check if max votes received and can commit?
+		rf.updateCommitIndex()
 	} else {
 		// decrement the nextIndex and try again
 		rf.nextIndex[server] = reply.MatchIndex
 	}
+}
 
-	// Check if max votes received and can commit?
-
-	// find highest index known to be replicated on all servers
-	// this will be a candidate to commit
-	cnt := map[int]int{}
-	maxIndexPresentOnAllServers := 0
-	maxIndexCanBeCommited := 0
+func (rf *Raft) updateCommitIndex() {
+	matchIndexes := make([]int, len(rf.peers))
 
 	for i, v := range rf.matchIndex {
 		if i == rf.me {
+			matchIndexes[i] = rf.getLastIndex()
 			continue
 		}
 
-		cnt[v]++
-		if cnt[v] > maxIndexPresentOnAllServers {
-			maxIndexPresentOnAllServers = cnt[v]
-			maxIndexCanBeCommited = v
-		} else if cnt[v] == maxIndexPresentOnAllServers {
-			maxIndexCanBeCommited = max(v, maxIndexCanBeCommited)
-		}
+		matchIndexes[i] = v
 	}
 
-	// check if this candidate is present on majority servers
-	if maxIndexPresentOnAllServers >= (len(rf.peers)-1)/2 {
-		if maxIndexCanBeCommited > rf.commitIndex && rf.log[rf.getCurrentLogIndex(maxIndexCanBeCommited)].Term == rf.currentTerm {
-			rf.commitIndex = maxIndexCanBeCommited
-		}
-	}
+	sort.Ints(matchIndexes)
+	majorityCommit := matchIndexes[len(rf.peers)/2]
 
-	// send update to application
-	go rf.applyCommits()
+	if majorityCommit > rf.commitIndex && rf.log[rf.getCurrentLogIndex(majorityCommit)].Term == rf.currentTerm {
+		rf.commitIndex = majorityCommit
+		rf.applyCond.Broadcast()
+	}
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
@@ -659,7 +632,7 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply
 	rf.nextIndex[server] = args.LastIncludedIndex + 1
 	rf.matchIndex[server] = args.LastIncludedIndex
 
-	go rf.applyCommits()
+	rf.updateCommitIndex()
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -696,6 +669,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	logEntry := LogEntry{Term: rf.currentTerm, Command: command, Index: index}
 	rf.log = append(rf.log, logEntry)
+
+	rf.sendUpdates()
 
 	return index, term, isLeader
 }
@@ -766,29 +741,36 @@ func (rf *Raft) sendUpdates() {
 
 func (rf *Raft) applyCommits() {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	if rf.lastApplied >= rf.commitIndex {
-		rf.mu.Unlock()
-		return
-	}
-
-	var entriesToApply []ApplyMsg
-
-	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-		replyMsg := ApplyMsg{
-			CommandValid: true,
-			Command:      rf.log[rf.getCurrentLogIndex(i)].Command,
-			CommandIndex: i,
+	for !rf.killed() {
+		if rf.commitIndex > rf.lastApplied {
+			if rf.lastApplied < rf.lastIncludedIndex {
+				rf.lastApplied = rf.lastIncludedIndex
+				msg := ApplyMsg{
+					CommandValid:  false,
+					SnapshotValid: true,
+					Snapshot:      rf.persister.ReadSnapshot(),
+					SnapshotTerm:  rf.lastIncludedTerm,
+					SnapshotIndex: rf.lastIncludedIndex,
+				}
+				rf.mu.Unlock()
+				rf.applyCh <- msg
+				rf.mu.Lock()
+			} else {
+				rf.lastApplied++
+				msg := ApplyMsg{
+					CommandValid: true,
+					Command:      rf.log[rf.getCurrentLogIndex(rf.lastApplied)].Command,
+					CommandIndex: rf.lastApplied,
+				}
+				rf.mu.Unlock()
+				rf.applyCh <- msg
+				rf.mu.Lock()
+			}
+		} else {
+			rf.applyCond.Wait()
 		}
-
-		entriesToApply = append(entriesToApply, replyMsg)
-	}
-
-	rf.lastApplied = rf.commitIndex
-	rf.mu.Unlock()
-
-	for _, applyMsg := range entriesToApply {
-		rf.applyCh <- applyMsg
 	}
 }
 
@@ -849,7 +831,7 @@ func (rf *Raft) ticker() {
 		rf.mu.Unlock()
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 150 + (rand.Int63()%10)*10
+		ms := 100 + (rand.Int63()%10)*5
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
@@ -896,11 +878,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastIncludedIndex = 0
 	rf.lastIncludedTerm = -1
 
+	rf.applyCond = sync.NewCond(&rf.mu)
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+
+	go rf.applyCommits()
 
 	return rf
 }
