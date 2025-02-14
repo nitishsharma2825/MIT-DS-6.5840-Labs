@@ -4,14 +4,21 @@ package shardctrler
 // Shardctrler clerk.
 //
 
-import "6.5840/labrpc"
-import "time"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
+	"sync"
+	"time"
+
+	"6.5840/labrpc"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	clientId  int64
+	requestId int
+	mu        sync.Mutex
 }
 
 func nrand() int64 {
@@ -25,11 +32,23 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.clientId = nrand()
+	ck.requestId = 0
 	return ck
 }
 
+func (ck *Clerk) getNewRequestId() int {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	ck.requestId++
+	return ck.requestId
+}
+
 func (ck *Clerk) Query(num int) Config {
-	args := &QueryArgs{}
+	args := &QueryArgs{
+		ClientId:  ck.clientId,
+		RequestId: ck.getNewRequestId(),
+	}
 	// Your code here.
 	args.Num = num
 	for {
@@ -37,7 +56,7 @@ func (ck *Clerk) Query(num int) Config {
 		for _, srv := range ck.servers {
 			var reply QueryReply
 			ok := srv.Call("ShardCtrler.Query", args, &reply)
-			if ok && reply.WrongLeader == false {
+			if ok && !reply.WrongLeader {
 				return reply.Config
 			}
 		}
@@ -46,7 +65,10 @@ func (ck *Clerk) Query(num int) Config {
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
+	args := &JoinArgs{
+		ClientId:  ck.clientId,
+		RequestId: ck.getNewRequestId(),
+	}
 	// Your code here.
 	args.Servers = servers
 
@@ -55,7 +77,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 		for _, srv := range ck.servers {
 			var reply JoinReply
 			ok := srv.Call("ShardCtrler.Join", args, &reply)
-			if ok && reply.WrongLeader == false {
+			if ok && !reply.WrongLeader {
 				return
 			}
 		}
@@ -64,7 +86,10 @@ func (ck *Clerk) Join(servers map[int][]string) {
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
+	args := &LeaveArgs{
+		ClientId:  ck.clientId,
+		RequestId: ck.getNewRequestId(),
+	}
 	// Your code here.
 	args.GIDs = gids
 
@@ -73,7 +98,7 @@ func (ck *Clerk) Leave(gids []int) {
 		for _, srv := range ck.servers {
 			var reply LeaveReply
 			ok := srv.Call("ShardCtrler.Leave", args, &reply)
-			if ok && reply.WrongLeader == false {
+			if ok && !reply.WrongLeader {
 				return
 			}
 		}
@@ -82,7 +107,10 @@ func (ck *Clerk) Leave(gids []int) {
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
+	args := &MoveArgs{
+		ClientId:  ck.clientId,
+		RequestId: ck.getNewRequestId(),
+	}
 	// Your code here.
 	args.Shard = shard
 	args.GID = gid
@@ -92,7 +120,7 @@ func (ck *Clerk) Move(shard int, gid int) {
 		for _, srv := range ck.servers {
 			var reply MoveReply
 			ok := srv.Call("ShardCtrler.Move", args, &reply)
-			if ok && reply.WrongLeader == false {
+			if ok && !reply.WrongLeader {
 				return
 			}
 		}
