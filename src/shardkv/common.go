@@ -53,8 +53,18 @@ type MigrateArgs struct {
 }
 
 type MigrateReply struct {
+	// Gid            int
 	Data           map[int]map[string]string
 	CachedRequests map[int64]int
 	ConfigNum      int
 	Err            Err
 }
+
+// type DeleteShardsArgs struct {
+// 	Shards    []int
+// 	ConfigNum int
+// }
+
+// type DeleteShardsReply struct {
+// 	Err Err
+// }

@@ -400,6 +400,8 @@ func (kv *ShardKV) handleMigration(reply *MigrateReply) {
 
 	// DPrintf("[%d %d] Inside handle migration, my current config %v", kv.gid, kv.me, kv.serveShards)
 
+	// receviedShards := make([]int, 0)
+
 	for shard, kvData := range reply.Data {
 		for k, v := range kvData {
 			if _, ok := kv.db[shard]; !ok {
@@ -408,6 +410,7 @@ func (kv *ShardKV) handleMigration(reply *MigrateReply) {
 			kv.db[shard][k] = v
 		}
 		kv.serveShards[shard] = "serve"
+		// receviedShards = append(receviedShards, shard)
 	}
 
 	for k, v := range reply.CachedRequests {
@@ -415,6 +418,8 @@ func (kv *ShardKV) handleMigration(reply *MigrateReply) {
 			kv.clientRequests[k] = v
 		}
 	}
+
+	// go kv.sendDeleteShardsRPC(reply.ConfigNum, reply.Gid, receviedShards)
 }
 
 func (kv *ShardKV) pullData() {
@@ -460,6 +465,28 @@ func (kv *ShardKV) pullData() {
 	}
 }
 
+// func (kv *ShardKV) sendDeleteShardsRPC(configNum int, gid int, shards []int) {
+
+// 	config := kv.mck.Query(configNum)
+// 	servers := config.Groups[gid]
+
+// 	args := DeleteShardsArgs{
+// 		Shards:    shards,
+// 		ConfigNum: configNum,
+// 	}
+
+// 	for _, server := range servers {
+// 		// get server endpoint to call
+// 		srv := kv.make_end(server)
+// 		reply := DeleteShardsReply{}
+// 		ok := srv.Call("ShardKV.DeleteShards", &args, &reply)
+// 		if !ok || reply.Err != OK {
+// 			// commit to log before merging data, handled in receiveUpdates and handleMigration functions
+// 			DPrintf("Error in sending delete shards RPC")
+// 		}
+// 	}
+// }
+
 func (kv *ShardKV) sendMigrateRPC(wg *sync.WaitGroup, args *MigrateArgs, servers []string) {
 	defer wg.Done()
 	for _, server := range servers {
@@ -489,6 +516,7 @@ func (kv *ShardKV) Migrate(args *MigrateArgs, reply *MigrateReply) {
 		return
 	}
 
+	// reply.Gid = kv.gid
 	reply.Data = make(map[int]map[string]string)
 	reply.CachedRequests = make(map[int64]int)
 	reply.ConfigNum = args.ConfigNum
@@ -506,6 +534,26 @@ func (kv *ShardKV) Migrate(args *MigrateArgs, reply *MigrateReply) {
 
 	reply.Err = OK
 }
+
+// func (kv *ShardKV) DeleteShards(args *DeleteShardsArgs, reply *DeleteShardsReply) {
+// 	_, isLeader := kv.rf.GetState()
+// 	if !isLeader {
+// 		reply.Err = ErrWrongLeader
+// 		return
+// 	}
+
+// 	kv.mu.Lock()
+// 	defer kv.mu.Unlock()
+
+// 	for _, shard := range args.Shards {
+// 		_, ok := kv.serveShards[shard]
+// 		if !ok {
+// 			delete(kv.db, shard)
+// 		}
+// 	}
+
+// 	reply.Err = OK
+// }
 
 // servers[] contains the ports of the servers in this group.
 //
