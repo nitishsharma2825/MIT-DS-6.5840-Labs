@@ -119,7 +119,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	command := Op{
 		Key:       args.Key,
 		Value:     "",
-		Type:      "get",
+		Type:      "Get",
 		ClientId:  args.ClientId,
 		RequestId: args.RequestId,
 	}
@@ -294,12 +294,12 @@ func (kv *ShardKV) receiveUpdates() {
 				if isDup {
 					op.Value = kv.db[shard][op.Key]
 				} else {
-					if op.Type == "get" {
+					if op.Type == "Get" {
 						op.Value = kv.db[shard][op.Key]
-					} else if op.Type == "put" {
+					} else if op.Type == "Put" {
 						kv.db[shard][op.Key] = op.Value
 						op.Value = kv.db[shard][op.Key]
-					} else if op.Type == "append" {
+					} else if op.Type == "Append" {
 						kv.db[shard][op.Key] += op.Value
 						op.Value = kv.db[shard][op.Key]
 					}
@@ -328,6 +328,7 @@ func (kv *ShardKV) pollConfigChanges() {
 
 			canPullLatestConfig := true
 
+			// at first, this will be empty so we can pull starting config
 			for _, status := range kv.serveShards {
 				if status != "serve" {
 					canPullLatestConfig = false
@@ -338,7 +339,6 @@ func (kv *ShardKV) pollConfigChanges() {
 			if canPullLatestConfig {
 				nextConfigNum := kv.currentConfig.Num + 1
 				newConfig := kv.mck.Query(nextConfigNum)
-
 				if newConfig.Num == nextConfigNum {
 					// commit in log before applying new config
 					kv.rf.Start(newConfig)
@@ -354,6 +354,8 @@ func (kv *ShardKV) pollConfigChanges() {
 func (kv *ShardKV) handleConfigChange(newConfig shardctrler.Config) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+
+	// DPrintf("[%d %d] Inside handle config change before, my current config %v", kv.gid, kv.me, kv.serveShards)
 
 	if newConfig.Num <= kv.currentConfig.Num {
 		return
@@ -384,6 +386,8 @@ func (kv *ShardKV) handleConfigChange(newConfig shardctrler.Config) {
 
 	kv.lastConfig = kv.currentConfig
 	kv.currentConfig = newConfig
+
+	// DPrintf("[%d %d] Inside handle config change after, my current config %v", kv.gid, kv.me, kv.serveShards)
 }
 
 func (kv *ShardKV) handleMigration(reply *MigrateReply) {
@@ -393,6 +397,8 @@ func (kv *ShardKV) handleMigration(reply *MigrateReply) {
 	if reply.ConfigNum != kv.currentConfig.Num-1 {
 		return
 	}
+
+	// DPrintf("[%d %d] Inside handle migration, my current config %v", kv.gid, kv.me, kv.serveShards)
 
 	for shard, kvData := range reply.Data {
 		for k, v := range kvData {
@@ -421,6 +427,8 @@ func (kv *ShardKV) pullData() {
 
 			// from each replica(GID), which shards are needed?
 			requestData := make(map[int][]int)
+
+			// DPrintf("[%d %d] Inside Pulling data, my current config %v", kv.gid, kv.me, kv.serveShards)
 
 			// for every shard which is in waitStatus, ask the replica group to send data
 			// use the last config (not current config) to find the replica group for shards
@@ -554,6 +562,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.lastApplied = 0
 	kv.currentConfig = kv.mck.Query(0)
 	kv.lastConfig = kv.mck.Query(0)
+
+	// DPrintf("[%d %d] Starting with config %v", kv.gid, kv.me, kv.currentConfig.Shards)
 
 	kv.restoreState(persister.ReadSnapshot())
 
